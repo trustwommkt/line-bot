@@ -1,7 +1,7 @@
 import os
 import json
 import threading
-from datetime import datetime, time
+from datetime import datetime
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -10,27 +10,22 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, PushMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, JoinEvent
-import google.generativeai as genai
+from google import genai
 import schedule
 
 app = Flask(__name__)
 
-# 環境變數
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-INTERNAL_GROUP_ID = os.environ.get('INTERNAL_GROUP_ID')  # 內部群組ID
+INTERNAL_GROUP_ID = os.environ.get('INTERNAL_GROUP_ID')
 
-# LINE SDK 設定
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Gemini 設定
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 儲存訊息（記憶體，重啟會清空）
-message_store = {}  # {group_id: [{time, user, text}]}
+message_store = {}
 
 def store_message(group_id, user_id, text):
     if group_id not in message_store:
@@ -52,7 +47,10 @@ def summarize_messages(group_id):
 
 請用繁體中文回覆，格式清楚。"""
     try:
-        response = model.generate_content(prompt)
+        response = gemini_client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt
+        )
         return response.text
     except Exception as e:
         return f"摘要失敗：{str(e)}"
@@ -66,10 +64,7 @@ def send_daily_summary():
             if msgs:
                 summary = summarize_messages(group_id)
                 all_summaries.append(f"📋 群組 {group_id[-6:]} 今日摘要：\n{summary}")
-        if all_summaries:
-            full_msg = "\n\n".join(all_summaries)
-        else:
-            full_msg = "今日所有群組無訊息記錄。"
+        full_msg = "\n\n".join(all_summaries) if all_summaries else "今日所有群組無訊息記錄。"
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.push_message(
@@ -78,7 +73,6 @@ def send_daily_summary():
                     messages=[TextMessage(text=f"📊 每日17:00訊息摘要\n\n{full_msg}")]
                 )
             )
-        # 清空當日記錄
         message_store.clear()
 
 def run_scheduler():
@@ -100,27 +94,24 @@ def webhook():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    source_type = event.source.type  # 'group', 'room', 'user'
+    source_type = event.source.type
     text = event.message.text
-    
+
     if source_type in ['group', 'room']:
         group_id = event.source.group_id if source_type == 'group' else event.source.room_id
         user_id = event.source.user_id or 'unknown'
         store_message(group_id, user_id, text)
-        
-        # 手動觸發摘要指令
+
         if text.strip() in ['整理', '摘要', '/summary', '重點']:
             summary = summarize_messages(group_id)
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
-                # 回覆到當前群組
                 line_bot_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
                         messages=[TextMessage(text=f"📋 目前訊息摘要：\n\n{summary}")]
                     )
                 )
-                # 同時推送到內部群組
                 if INTERNAL_GROUP_ID:
                     line_bot_api.push_message(
                         PushMessageRequest(
@@ -130,7 +121,6 @@ def handle_message(event):
                     )
     elif source_type == 'user':
         user_id = event.source.user_id
-        # 1對1 訊息也記錄
         store_message(user_id, user_id, text)
         if text.strip() in ['整理', '摘要', '/summary', '重點']:
             summary = summarize_messages(user_id)
@@ -166,7 +156,6 @@ def health():
     return 'OK'
 
 if __name__ == "__main__":
-    # 啟動排程執行緒
     scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
     scheduler_thread.start()
     port = int(os.environ.get('PORT', 8080))
