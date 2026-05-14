@@ -21,10 +21,10 @@ INTERNAL_GROUP_ID = os.environ.get('INTERNAL_GROUP_ID')
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 message_store = {}
+TRIGGER_WORDS = ['整理', '摘要', '/summary', '重點']
 
 def store_message(group_id, user_id, text):
     if group_id not in message_store:
@@ -37,7 +37,7 @@ def store_message(group_id, user_id, text):
 
 def summarize_messages(group_id):
     if group_id not in message_store or not message_store[group_id]:
-        return "今日無訊息記錄。"
+        return "目前尚無訊息記錄，請等群組有對話後再使用摘要功能。"
     msgs = message_store[group_id]
     text_block = "\n".join([f"[{m['time']}] {m['text']}" for m in msgs])
     prompt = f"""以下是今日群組對話記錄，請整理成重點摘要，條列重要事項、待辦事項、結論：
@@ -94,14 +94,18 @@ def webhook():
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     source_type = event.source.type
-    text = event.message.text
+    text = event.message.text.strip()
+    is_trigger = text in TRIGGER_WORDS
 
     if source_type in ['group', 'room']:
         group_id = event.source.group_id if source_type == 'group' else event.source.room_id
         user_id = event.source.user_id or 'unknown'
-        store_message(group_id, user_id, text)
 
-        if text.strip() in ['整理', '摘要', '/summary', '重點']:
+        # 只有非觸發指令才存入記錄
+        if not is_trigger:
+            store_message(group_id, user_id, text)
+
+        if is_trigger:
             summary = summarize_messages(group_id)
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
@@ -118,10 +122,15 @@ def handle_message(event):
                             messages=[TextMessage(text=f"📋 手動觸發摘要（群組 {group_id[-6:]}）：\n\n{summary}")]
                         )
                     )
+
     elif source_type == 'user':
         user_id = event.source.user_id
-        store_message(user_id, user_id, text)
-        if text.strip() in ['整理', '摘要', '/summary', '重點']:
+
+        # 只有非觸發指令才存入記錄
+        if not is_trigger:
+            store_message(user_id, user_id, text)
+
+        if is_trigger:
             summary = summarize_messages(user_id)
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
