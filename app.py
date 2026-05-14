@@ -1,5 +1,4 @@
 import os
-import json
 import threading
 from datetime import datetime
 from flask import Flask, request, abort
@@ -48,7 +47,7 @@ def summarize_messages(group_id):
 請用繁體中文回覆，格式清楚。"""
     try:
         response = gemini_client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=prompt
         )
         return response.text
